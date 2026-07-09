@@ -1,13 +1,14 @@
-import hre from "hardhat";
+import { network } from "hardhat";
 import fs from "fs";
 
 async function main() {
-    const [deployer] = await hre.ethers.getSigners();
+    const { ethers } = await network.connect();
+    const [deployer] = await ethers.getSigners();
     console.log("Deploying contracts with account:", deployer.address);
 
     // ── 1. Deploy BarCoin ──────────────────────────────────────────────────────
     console.log("\n[1/5] Deploying BarCoin...");
-    const BarCoin = await hre.ethers.getContractFactory("BarCoin");
+    const BarCoin = await ethers.getContractFactory("BarCoin");
     const barCoin = await BarCoin.deploy();
     await barCoin.waitForDeployment();
     const barCoinAddress = await barCoin.getAddress();
@@ -15,7 +16,7 @@ async function main() {
 
     // ── 2. Deploy BarNFT ───────────────────────────────────────────────────────
     console.log("\n[2/5] Deploying BarNFT...");
-    const BarNFT = await hre.ethers.getContractFactory("BarNFT");
+    const BarNFT = await ethers.getContractFactory("BarNFT");
     const barNFT = await BarNFT.deploy();
     await barNFT.waitForDeployment();
     const barNFTAddress = await barNFT.getAddress();
@@ -23,7 +24,7 @@ async function main() {
 
     // ── 3. Deploy RecipeNFT ────────────────────────────────────────────────────
     console.log("\n[3/5] Deploying RecipeNFT...");
-    const RecipeNFT = await hre.ethers.getContractFactory("RecipeNFT");
+    const RecipeNFT = await ethers.getContractFactory("RecipeNFT");
     const recipeNFT = await RecipeNFT.deploy();
     await recipeNFT.waitForDeployment();
     const recipeNFTAddress = await recipeNFT.getAddress();
@@ -31,7 +32,7 @@ async function main() {
 
     // ── 4. Deploy GamblingGame ─────────────────────────────────────────────────
     console.log("\n[4/5] Deploying GamblingGame...");
-    const GamblingGame = await hre.ethers.getContractFactory("GamblingGame");
+    const GamblingGame = await ethers.getContractFactory("GamblingGame");
     const gamblingGame = await GamblingGame.deploy(
         barCoinAddress,
         barNFTAddress,
@@ -43,7 +44,7 @@ async function main() {
 
     // ── 5. Deploy RecipeMarketplace ────────────────────────────────────────────
     console.log("\n[5/5] Deploying RecipeMarketplace...");
-    const RecipeMarketplace = await hre.ethers.getContractFactory("RecipeMarketplace");
+    const RecipeMarketplace = await ethers.getContractFactory("RecipeMarketplace");
     const recipeMarketplace = await RecipeMarketplace.deploy(
         recipeNFTAddress,
         barCoinAddress
