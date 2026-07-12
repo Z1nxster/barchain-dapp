@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { ethers } from "ethers";
-import { connectWallet } from "./utils/contracts.js";
+import { connectWallet, reconnectWallet } from "./utils/contracts.js";
 import RecipeCard   from "./components/RecipeCard.jsx";
 import BarCard      from "./components/BarCard.jsx";
 import MiningPopup  from "./components/MiningPopup.jsx";
@@ -505,6 +505,12 @@ export default function App() {
     }, 1000);
     return () => clearInterval(t);
   }, []);
+
+    useEffect(() => {
+        reconnectWallet().then(async (w) => {
+            if (w) { setWallet(w); await loadPlayerData(w); }
+        }).catch(() => {});
+    }, []);
 
   // ── Render: not connected ──────────────────────────────────────────────────
   if (!wallet) return (

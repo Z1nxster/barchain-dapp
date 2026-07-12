@@ -64,39 +64,64 @@ export function getContracts(signer) {
 }
 
 export async function connectWallet() {
-  if (!window.ethereum) throw new Error("MetaMask not found");
+    if (!window.ethereum) throw new Error("MetaMask not found");
 
-  const provider = new ethers.BrowserProvider(window.ethereum);
+    const provider = new ethers.BrowserProvider(window.ethereum);
 
-  // Force switch to Sepolia (chainId 0xaa36a7 = 11155111)
-  try {
-    await window.ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: "0xaa36a7" }],
-    });
-  } catch (switchError) {
-    // If Sepolia isn't added to MetaMask yet, add it automatically
-    if (switchError.code === 4902) {
-      await window.ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId:         "0xaa36a7",
-          chainName:       "Sepolia Testnet",
-          nativeCurrency:  { name: "SepoliaETH", symbol: "ETH", decimals: 18 },
-          rpcUrls:         ["https://rpc.sepolia.org"],
-          blockExplorerUrls: ["https://sepolia.etherscan.io"],
-        }],
-      });
-    } else {
-      throw switchError;
+    // Force switch to Sepolia (chainId 0xaa36a7 = 11155111)
+    try {
+        await window.ethereum.request({
+            method: "wallet_switchEthereumChain",
+            params: [{chainId: "0xaa36a7"}],
+        });
+    } catch (switchError) {
+        // If Sepolia isn't added to MetaMask yet, add it automatically
+        if (switchError.code === 4902) {
+            await window.ethereum.request({
+                method: "wallet_addEthereumChain",
+                params: [{
+                    chainId: "0xaa36a7",
+                    chainName: "Sepolia Testnet",
+                    nativeCurrency: {name: "SepoliaETH", symbol: "ETH", decimals: 18},
+                    rpcUrls: ["https://rpc.sepolia.org"],
+                    blockExplorerUrls: ["https://sepolia.etherscan.io"],
+                }],
+            });
+        } else {
+            throw switchError;
+        }
     }
-  }
+// --------------------------------------------------------------------
+    // Always show account picker — lets you switch wallets
+    await window.ethereum.request({
+        method: "wallet_requestPermissions",
+        params: [{eth_accounts: {}}],
+    });
 
-  await provider.send("eth_requestAccounts", []);
-  const signer    = await provider.getSigner();
-  const address   = await signer.getAddress();
-  const contracts = getContracts(signer);
-  return { provider, signer, address, contracts };
+    await provider.send("eth_requestAccounts", []);
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    const contracts = getContracts(signer);
+    return {provider, signer, address, contracts};
 }
+
+// Silent reconnect — used on page load, no picker popup
+export async function reconnectWallet() {
+    if (!window.ethereum) return null;
+    const accounts = await window.ethereum.request({method: "eth_accounts"});
+    if (!accounts.length) return null;
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    const contracts = getContracts(signer);
+    return {provider, signer, address, contracts};
+}
+// ----------------------------------------------------------------------
+/*await provider.send("eth_requestAccounts", []);
+const signer = await provider.getSigner();
+const address = await signer.getAddress();
+const contracts = getContracts(signer);
+return {provider, signer, address, contracts};
+}*/
 
 export { addresses };
