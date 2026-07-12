@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { ethers } from "ethers";
 import { connectWallet } from "./utils/contracts.js";
+import RecipeCard   from "./components/RecipeCard.jsx";
+import BarCard      from "./components/BarCard.jsx";
+import MiningPopup  from "./components/MiningPopup.jsx";
+import Marketplace from "./components/Marketplace.jsx";
+import { uploadMetadata } from "./utils/ipfs.js";
+import GameModal from "./components/GameModal.jsx";
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
@@ -228,6 +234,9 @@ export default function App() {
   const [toast,        setToast]        = useState("");
   const [toastVisible, setToastVisible] = useState(false);
   const [error,        setError]        = useState("");
+  const [mineResult, setMineResult] = useState(null);
+  const [listedIds, setListedIds] = useState(new Set());
+  const [activeGame, setActiveGame] = useState(null);
 
   // ── Toast ──────────────────────────────────────────────────────────────────
   const showToast = useCallback((msg) => {
@@ -237,6 +246,16 @@ export default function App() {
   }, []);
 
   // ── Connect wallet ─────────────────────────────────────────────────────────
+    function friendlyError(e) {
+        const msg = (e.reason || e.message || "").toLowerCase();
+        if (msg.includes("user rejected") || msg.includes("user denied")) return null; // silent cancel
+        if (msg.includes("cooldown"))      return "⏳ Still on cooldown — wait a moment and try again.";
+        if (msg.includes("mint your bar")) return "You need to mint your bar first!";
+        if (msg.includes("insufficient"))  return "Insufficient funds for this transaction.";
+        if (msg.includes("already owns"))  return "You already own a bar!";
+        return "Transaction failed — please try again.";
+    }
+
   async function handleConnect() {
     try {
       setError("");
@@ -262,6 +281,8 @@ export default function App() {
       if (minted) {
         const tokenId = await contracts.barNFT.addressToTokenId(address);
         const data    = await contracts.barNFT.getBarData(tokenId);
+        const activeIds = await contracts.recipeMarketplace.getActiveListings();
+        setListedIds(new Set(activeIds.map(id => Number(id))));
         setBarData({
           name:        data.name,
           level:       Number(data.level),
@@ -309,74 +330,95 @@ export default function App() {
   }
 
   // ── Mint bar ───────────────────────────────────────────────────────────────
-  async function handleMintBar() {
-    if (!barName.trim()) { setError("Enter a name for your bar!"); return; }
-    try {
-      setError("");
-      setLoading((p) => ({ ...p, mint: true }));
-      const tx = await wallet.contracts.barNFT.mintBar(barName.trim(), "ipfs://placeholder");
-      showToast("Minting your bar… please wait");
-      await tx.wait();
-      showToast("🍹 Bar minted!");
-      await loadPlayerData(wallet);
-    } catch (e) {
-      setError(e.reason || e.message);
-    } finally {
-      setLoading((p) => ({ ...p, mint: false }));
+    async function handleMintBar() {
+        if (!barName.trim()) { setError("Enter a name for your bar!"); return; }
+        try {
+            setError("");
+            setLoading((p) => ({ ...p, mint: true }));
+            showToast("Uploading bar metadata to IPFS...");
+
+            // Build and upload metadata to IPFS
+            const metadata = {
+                name:        barName.trim(),
+                description: `${barName.trim()} — a virtual bar on the BarChain DApp`,
+                attributes:  [
+                    { trait_type: "Level",    value: 1      },
+                    { trait_type: "Platform", value: "BarChain" },
+                ],
+                createdAt: new Date().toISOString(),
+            };
+            const ipfsURI = await uploadMetadata(`bar-${wallet.address}`, metadata);
+
+            showToast("Minting your bar NFT...");
+            const tx = await wallet.contracts.barNFT.mintBar(barName.trim(), ipfsURI);
+            await tx.wait();
+            showToast("🍹 Bar minted with IPFS metadata!");
+            await loadPlayerData(wallet);
+        } catch (e) {
+            const msg = friendlyError(e);
+            if (msg) setError(msg);
+        } finally {
+            setLoading((p) => ({ ...p, mint: false }));
+        }
     }
-  }
 
   // ── Play game ──────────────────────────────────────────────────────────────
-  async function handlePlay(gameId) {
-    if (cooldown > 3) {
-      setGameResults((p) => ({ ...p, [gameId]: { won: false, msg: `⏳ Wait ${cooldown}s` } }));
-      setTimeout(() => setGameResults((p) => ({ ...p, [gameId]: null })), 3000);
-      return;
-    }
-    try {
-      setError("");
-      setLoading((p)   => ({ ...p, [gameId]: true }));
-      setAnimating((p) => ({ ...p, [gameId]: true }));
-      setGameResults((p) => ({ ...p, [gameId]: null }));
-
-      const tx      = await wallet.contracts.gamblingGame.playGame(gameId);
-      showToast("Waiting for confirmation...");
-      const receipt = await tx.wait();
-
-      const iface = wallet.contracts.gamblingGame.interface;
-      let won = false, reward = 0n, recipeWon = false;
-      for (const log of receipt.logs) {
+    async function handlePlay(gameId) {
+        if (cooldown > 3) {
+            setGameResults((p) => ({ ...p, [gameId]: { won: false, msg: `⏳ Wait ${cooldown}s` } }));
+            setTimeout(() => setGameResults((p) => ({ ...p, [gameId]: null })), 3000);
+            return;
+        }
         try {
-          const parsed = iface.parseLog(log);
-          if (parsed?.name === "GamePlayed") {
-            won       = parsed.args.won;
-            reward    = parsed.args.rewardAmount;
-            recipeWon = parsed.args.recipeWon;
-          }
-        } catch (_) {}
-      }
+            setError("");
+            setLoading((p)   => ({ ...p, [gameId]: true }));
+            setAnimating((p) => ({ ...p, [gameId]: true }));
+            setGameResults((p) => ({ ...p, [gameId]: null }));
 
-      const msg = won
-        ? `🎉 You won ${fmt(reward)} $BAR!${recipeWon ? " 🍹 + Recipe NFT!" : ""}`
-        : "😔 No luck this time!";
+            const tx = await wallet.contracts.gamblingGame.playGame(gameId);
+            showToast("Confirming on Sepolia — this may take 30s...");
 
-      setGameResults((p) => ({ ...p, [gameId]: { won, msg } }));
-      if (won) showToast(msg);
-      setTimeout(() => setGameResults((p) => ({ ...p, [gameId]: null })), 5000);
-      await loadPlayerData(wallet);
-    } catch (e) {
-      const msg = e.reason || e.message || "";
-      if (msg.includes("cooldown")) {
-        setGameResults((p) => ({ ...p, [gameId]: { won: false, msg: "⏳ Cooldown still active — wait a few more seconds" } }));
-        setTimeout(() => setGameResults((p) => ({ ...p, [gameId]: null })), 4000);
-      } else {
-        setError(msg);
-      }
-    } finally {
-      setLoading((p)   => ({ ...p, [gameId]: false }));
-      setTimeout(() => setAnimating((p) => ({ ...p, [gameId]: false })), 700);
+            // Timeout after 90s — Sepolia can be slow
+            const receipt = await Promise.race([
+                tx.wait(),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error("timeout")), 90_000)
+                ),
+            ]);
+
+            const iface = wallet.contracts.gamblingGame.interface;
+            let won = false, reward = 0n, recipeWon = false;
+            for (const log of receipt.logs) {
+                try {
+                    const parsed = iface.parseLog(log);
+                    if (parsed?.name === "GamePlayed") {
+                        won = parsed.args.won; reward = parsed.args.rewardAmount; recipeWon = parsed.args.recipeWon;
+                    }
+                } catch (_) {}
+            }
+
+            const msg = won
+                ? `🎉 You won ${fmt(reward)} $BAR!${recipeWon ? " 🍹 + Recipe NFT!" : ""}`
+                : "😔 No luck this time!";
+
+            setGameResults((p) => ({ ...p, [gameId]: { won, msg } }));
+            if (won) showToast(msg);
+            setTimeout(() => setGameResults((p) => ({ ...p, [gameId]: null })), 5000);
+            await loadPlayerData(wallet);
+        } catch (e) {
+            const raw = e.message || "";
+            const msg = raw.includes("timeout")
+                ? "⏳ Transaction timed out — please try again."
+                : friendlyError(e);
+            if (msg) {
+                setGameResults((p) => ({ ...p, [gameId]: { won: false, msg } }));
+                setTimeout(() => setGameResults((p) => ({ ...p, [gameId]: null })), 4000);
+            }
+        } finally {
+            setLoading((p)   => ({ ...p, [gameId]: false }));
+            setTimeout(() => setAnimating((p) => ({ ...p, [gameId]: false })), 700);
+        }
     }
-  }
 
   // ── Mining ─────────────────────────────────────────────────────────────────
   function startMining() {
@@ -418,24 +460,42 @@ export default function App() {
     findHash();
   }
 
-  async function submitMiningProof(nonce) {
-    try {
-      const tx = await wallet.contracts.gamblingGame.submitMiningProof(nonce);
-      await tx.wait();
-      showToast("⛏️ Mining reward claimed!");
-      await loadPlayerData(wallet);
-    } catch (e) {
-      const msg = e.reason || e.message || "";
-      if (msg.includes("cooldown")) {
-        showToast("⏳ Mining cooldown still active");
-      } else {
-        setError(msg);
-      }
-    } finally {
-      setMining(false);
-      setMineProgress(0);
+    async function submitMiningProof(nonce) {
+        try {
+            const tx      = await wallet.contracts.gamblingGame.submitMiningProof(nonce);
+            const receipt = await tx.wait();
+
+            // Parse events to get what was earned
+            const gameIface = wallet.contracts.gamblingGame.interface;
+            let barAmount = 0n;
+            let recipe    = null;
+            for (const log of receipt.logs) {
+                try {
+                    const parsed = gameIface.parseLog(log);
+                    if (parsed?.name === "MiningRewardGiven") barAmount = parsed.args.rewardAmount;
+                    if (parsed?.name === "RecipeAwarded") {
+                        recipe = {
+                            name:   parsed.args.name,
+                            rarity: ["Common","Rare","Legendary"][Number(parsed.args.rarity)] ?? "Common",
+                        };
+                    }
+                } catch (e) {
+                    const msg = friendlyError(e);
+                    if (msg) showToast(msg);
+                }
+            }
+
+            setMineResult({ barAmount, recipe });
+            await loadPlayerData(wallet);
+        } catch (e) {
+            const msg = e.reason || e.message || "";
+            if (msg.includes("cooldown")) showToast("⏳ Mining cooldown still active");
+            else setError(friendlyError(e) ?? "");
+        } finally {
+            setMining(false);
+            setMineProgress(0);
+        }
     }
-  }
 
   // ── Cooldown countdown ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -488,6 +548,7 @@ export default function App() {
           {error && <div style={S.error}>{error}</div>}
           <button style={S.bigBtn} onClick={handleMintBar} disabled={loading.mint}>
             {loading.mint ? "Minting…" : "🍹 Mint My Bar"}
+
           </button>
         </div>
       </div>
@@ -506,6 +567,14 @@ export default function App() {
           <div style={{ color: "#FFD700", fontWeight: "bold" }}>{barBal} $BAR</div>
           <div style={S.addressBadge}>{shortAddr(wallet.address)}</div>
           <button style={S.walletBtn} onClick={() => loadPlayerData(wallet)}>↻ Refresh</button>
+            <button style={{ ...S.walletBtn, borderColor:"rgba(255,100,100,0.4)", color:"#ff8080" }}
+                    onClick={() => {
+                        setWallet(null); setHasBar(false); setBarData(null);
+                        setBarBal("0"); setRecipes([]); setListedIds(new Set());
+                        setTab("bar"); setActiveGame(null);
+                    }}>
+                Disconnect
+            </button>
         </div>
       </nav>
 
@@ -528,92 +597,59 @@ export default function App() {
         {error && <div style={S.error}>{error}</div>}
 
         {/* ── MY BAR ── */}
-        {tab === "bar" && barData && (
-          <>
-            <div style={S.card}>
-              <div style={S.cardTitle}>🏠 {barData.name}</div>
-              <div style={S.statGrid}>
-                <div style={S.statBox}>
-                  <div style={S.statValue}>Lv.{barData.level}</div>
-                  <div style={S.statLabel}>Bar Level</div>
-                </div>
-                <div style={S.statBox}>
-                  <div style={S.statValue}>{barBal}</div>
-                  <div style={S.statLabel}>$BAR Balance</div>
-                </div>
-                <div style={S.statBox}>
-                  <div style={S.statValue}>{barData.gamesPlayed}</div>
-                  <div style={S.statLabel}>Games Played</div>
-                </div>
-                <div style={S.statBox}>
-                  <div style={S.statValue}>{barData.recipeCount}</div>
-                  <div style={S.statLabel}>Recipes Collected</div>
-                </div>
-                <div style={S.statBox}>
-                  <div style={S.statValue}>#{barData.tokenId}</div>
-                  <div style={S.statLabel}>Token ID</div>
-                </div>
-                <div style={S.statBox}>
-                  {/* FIXED: single style prop, not two */}
-                  <div style={{ ...S.statValue, fontSize: "16px" }}>{barData.mintDate}</div>
-                  <div style={S.statLabel}>Opened On</div>
-                </div>
-              </div>
-            </div>
-            <div style={S.card}>
-              <div style={S.cardTitle}>📈 Level Progress</div>
-              <div style={{ color: "#a08060", fontSize: "14px", lineHeight: "1.8" }}>
-                <div>Level 2: 5 games or 2 recipes</div>
-                <div>Level 3: 20 games or 8 recipes</div>
-                <div>Level 4: 45 games or 18 recipes</div>
-                <div>Level 5: 80 games or 32 recipes</div>
-                <div style={{ marginTop: "8px", color: "#FFD700" }}>
-                  Current: {barData.gamesPlayed} games, {barData.recipeCount} recipes
-                </div>
-              </div>
-            </div>
-          </>
-        )}
+          {tab === "bar" && barData && (
+              <>
+                  <BarCard barData={barData} barBal={barBal} />
+                  <div style={{ ...S.card, marginTop: "20px" }}>
+                      <div style={S.cardTitle}>📈 Level Progress</div>
+                      <div style={{ color: "#a08060", fontSize: "14px", lineHeight: "1.8" }}>
+                          <div>Level 2: 5 games or 2 recipes</div>
+                          <div>Level 3: 20 games or 8 recipes</div>
+                          <div>Level 4: 45 games or 18 recipes</div>
+                          <div>Level 5: 80 games or 32 recipes</div>
+                          <div style={{ marginTop: "8px", color: "#FFD700" }}>
+                              Current: {barData.gamesPlayed} games, {barData.recipeCount} recipes
+                          </div>
+                      </div>
+                  </div>
+              </>
+          )}
 
         {/* ── GAMES ── */}
-        {tab === "games" && (
-          <>
-            {cooldown > 3 && (
-              <div style={{ ...S.card, textAlign: "center", color: "#FFD700" }}>
-                ⏳ Game cooldown: <strong>{cooldown}s</strong> remaining
-              </div>
-            )}
-            <div style={S.gameGrid}>
-              {GAMES.map((g) => (
-                <div key={g.id} style={S.gameCard} className="game-card-hover">
-                  <div style={{
-                    fontSize: "48px", marginBottom: "12px", display: "inline-block",
-                    animation: animating[g.id] ? g.anim : "none",
-                  }}>
-                    {g.emoji}
-                  </div>
-                  <div style={S.gameName}>{g.name}</div>
-                  <div style={S.gameDesc}>{g.desc}</div>
-                  <button
-                    style={S.playBtn(loading[g.id] || cooldown > 3)}
-                    onClick={() => handlePlay(g.id)}
-                    disabled={loading[g.id] || cooldown > 3}
-                  >
-                    {loading[g.id] ? "Playing…" : cooldown > 3 ? `Wait ${cooldown}s` : "▶ Play"}
-                  </button>
-                  {gameResults[g.id] && (
-                    <div style={{
-                      ...S.result(gameResults[g.id].won),
-                      animation: gameResults[g.id].won ? "winPop 0.4s ease-in-out" : "none",
-                    }}>
-                      {gameResults[g.id].msg}
-                    </div>
+          {tab === "games" && (
+              <>
+                  {cooldown > 3 && (
+                      <div style={{ ...S.card, textAlign:"center", color:"#FFD700" }}>
+                          ⏳ Game cooldown: <strong>{cooldown}s</strong> remaining
+                      </div>
                   )}
-                </div>
-              ))}
-            </div>
-          </>
-        )}
+                  <div style={S.gameGrid}>
+                      {GAMES.map((g) => (
+                          <div key={g.id} style={S.gameCard} className="game-card-hover"
+                               onClick={() => setActiveGame(g)}>
+                              <div style={{ fontSize:"48px", marginBottom:"12px" }}>{g.emoji}</div>
+                              <div style={S.gameName}>{g.name}</div>
+                              <div style={S.gameDesc}>{g.desc}</div>
+                              <button style={S.playBtn(cooldown > 3)} disabled={cooldown > 3}>
+                                  {cooldown > 3 ? `Wait ${cooldown}s` : "▶ Play"}
+                              </button>
+                          </div>
+                      ))}
+                  </div>
+                  {activeGame && (
+                      <GameModal
+                          game={activeGame}
+                          wallet={wallet}
+                          cooldown={cooldown}
+                          onClose={() => setActiveGame(null)}
+                          onResult={async () => {
+                              setCooldown(30);
+                              await loadPlayerData(wallet);
+                          }}
+                      />
+                  )}
+              </>
+          )}
 
         {/* ── MINE ── */}
         {tab === "mine" && (
@@ -658,44 +694,44 @@ export default function App() {
         )}
 
         {/* ── RECIPES ── */}
-        {tab === "inventory" && (
-          <div style={S.card}>
-            <div style={S.cardTitle}>🍹 My Recipe Collection ({recipes.length})</div>
-            {recipes.length === 0 ? (
-              <div style={{ color: "#a08060", textAlign: "center", padding: "40px" }}>
-                No recipes yet — play games to win some!
+          {tab === "inventory" && (
+              <div style={S.card}>
+                  <div style={S.cardTitle}>🍹 My Recipe Collection ({recipes.length})</div>
+                  {recipes.length === 0 ? (
+                      <div style={{ color: "#a08060", textAlign: "center", padding: "40px" }}>
+                          No recipes yet — play games to win some!
+                      </div>
+                  ) : (
+                      <div style={S.gameGrid}>
+                          {recipes.map((r) => (
+                              <RecipeCard key={r.tokenId} recipe={r}
+                                          isListed={listedIds.has(r.tokenId)}
+                                          onList={(recipe) => {
+                                              setTab("marketplace");
+                                              setTimeout(() =>
+                                                      document.dispatchEvent(new CustomEvent("openListModal", { detail: recipe }))
+                                                  , 100);
+                                          }}
+                              />
+                          ))}
+                      </div>
+                  )}
               </div>
-            ) : (
-              <div style={S.gameGrid}>
-                {recipes.map((r) => (
-                  <div key={r.tokenId} style={S.recipeCard}>
-                    <div style={S.rarityBadge(r.rarity)}>{r.rarity}</div>
-                    <div style={{ fontSize: "18px", fontWeight: "bold", color: "#f0e6d3", marginBottom: "6px" }}>
-                      {r.name}
-                    </div>
-                    <div style={{ fontSize: "13px", color: "#a08060" }}>
-                      Token #{r.tokenId} · Minted {r.mintDate}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+          )}
 
         {/* ── MARKETPLACE ── */}
-        {tab === "marketplace" && (
-          <div style={S.card}>
-            <div style={S.cardTitle}>🏪 Recipe Marketplace</div>
-            <div style={{ color: "#a08060", textAlign: "center", padding: "40px" }}>
-              Marketplace coming soon — list and trade your Recipe NFTs here.
-            </div>
-          </div>
-        )}
+          {tab === "marketplace" && (
+              <Marketplace
+                  wallet={wallet}
+                  recipes={recipes}
+                  onRefresh={() => loadPlayerData(wallet)}
+              />
+          )}
       </div>
 
       {/* Toast */}
       <div style={S.toast(toastVisible)}>{toast}</div>
+        <MiningPopup result={mineResult} onClose={() => setMineResult(null)} />
     </div>
   );
 }

@@ -39,6 +39,7 @@ const GamblingGameABI = [
   "function MINE_COOLDOWN() view returns (uint256)",
   "event GamePlayed(address indexed player, uint8 gameType, bool won, uint256 rewardAmount, bool recipeWon, uint256 timestamp)",
   "event RecipeAwarded(address indexed player, uint256 indexed tokenId, string name, uint8 rarity, uint256 timestamp)",
+  "event MiningRewardGiven(address indexed player, uint256 rewardAmount, uint256 timestamp)",
 ];
 
 const RecipeMarketplaceABI = [
